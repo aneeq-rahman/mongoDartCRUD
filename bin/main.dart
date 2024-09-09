@@ -1,50 +1,121 @@
+import 'dart:convert';
 import 'package:mongo_dart/mongo_dart.dart';
+import 'package:shelf/shelf.dart';
+import 'package:shelf/shelf_io.dart' as shelf_io;
 
-import 'package:dart_mongo/dart_mongo.dart' as dart_mongo;
+Future<void> main() async {
+  // Connect to the MongoDB database
+  final db = await connectToDatabase();
+  final collection = db.collection('my_collection');
 
-main(List<String> arguments) async {
-  Db db = Db('mongodb://localhost:27017/test');
+  // Define the handler for incoming HTTP requests
+  final handler = const Pipeline()
+      .addMiddleware(logRequests())
+      .addHandler((Request request) async {
+    switch (request.method) {
+      case 'GET':
+        return await getCrud(request, collection);
+
+      case 'POST':
+        return await postCrud(request, collection);
+
+      case 'PUT':
+        return await putCrud(request, collection);
+
+      case 'DELETE':
+        return await deleteCrud(request, collection);
+
+      default:
+        return Response.notFound('Not Found');
+    }
+  });
+
+  // Use the serve() method to start the HTTP server
+  final server = await shelf_io.serve(handler, 'localhost', 8080);
+  print('Serving at http://${server.address.host}:${server.port}');
+}
+
+// Function to connect to the MongoDB database
+Future<Db> connectToDatabase() async {
+  final db = Db('mongodb://localhost:27017/my_database');
   await db.open();
+  return db;
+}
 
-  print('Connected to database');
+Future<Response> getCrud(Request request, DbCollection collection) async {
+  try {
+    final result = await collection.find().toList();
+    return Response.ok(jsonEncode(result),
+        headers: {'Content-Type': 'application/json'});
+  } catch (e) {
+    return Response.internalServerError(body: 'Error fetching data: $e');
+  }
+}
 
-  DbCollection coll = db.collection('people');
+Future<Response> postCrud(Request request, DbCollection collection) async {
+  try {
+    final payload = await request.readAsString();
+    final data = jsonDecode(payload);
 
-  // Read people
-  // var people = await coll.find().toList();
-  var people = await coll.find(where.limit(5)).toList();
-  print(people);
+    if (data is Map<String, dynamic>) {
+      await collection.insert(data);
+      return Response.ok('Inserted');
+    } else {
+      return Response.badRequest(body: 'Invalid payload format');
+    }
+  } catch (e) {
+    return Response.internalServerError(body: 'Error inserting data: $e');
+  }
+}
 
-  var person = await coll
-      // .findOne(where.match('first_name', 'B').and(where.gt('id', 40)));
-      // .findOne(where.match('first_name', 'B').gt('id', 40));
-      .findOne(where.jsQuery('''
-      return this.first_name.startsWith('B') && this.id > 40;
-      '''));
-  print(person);
+Future<Response> putCrud(Request request, DbCollection collection) async {
+  try {
+    final payload = await request.readAsString();
+    final data = jsonDecode(payload);
 
-  // Create person
-  await coll.save({
-    'id': 101,
-    'first_name': 'Jermaine',
-    "last_name": "Gippes",
-    "email": "cgippes2r@xinhuanet.com",
-    "gender": "Female",
-    "ip_address": "97.252.84.122"
-  });
-  print('Saved new person');
+    if (data.containsKey('id') && data.containsKey('name')) {
+      final id = data['id'];
+      final updatedName = data['name'];
 
-  // Update person
-  await coll.update(await coll.findOne(where.eq('id', 101)), {
-    r'$set': {'gender': 'Male'}
-  });
-  print('Updated person');
-  print(await coll.findOne(where.eq('id', 101)));
+      final objectId = ObjectId.fromHexString(id);
+      final updatedResult = await collection.findAndModify(
+          query: where.id(objectId),
+          update: modify.set('name', updatedName),
+          returnNew: true);
 
-  // Delete person
-  await coll.remove(await coll.findOne(where.eq('id', 101)));
-  print('Deleted person');
-  print(await coll.findOne(where.eq('id', 101))); // null
+      if (updatedResult != null) {
+        return Response.ok(jsonEncode(updatedResult),
+            headers: {'Content-Type': 'application/json'});
+      } else {
+        return Response.notFound('Document not found');
+      }
+    } else {
+      return Response.badRequest(
+          body: 'Invalid body, id and name are required');
+    }
+  } catch (e) {
+    return Response.internalServerError(body: 'Error updating document: $e');
+  }
+}
 
-  await db.close();
+Future<Response> deleteCrud(Request request, DbCollection collection) async {
+  try {
+    final payload = await request.readAsString();
+    final data = jsonDecode(payload);
+
+    if (data.containsKey('id')) {
+      final objectId = ObjectId.fromHexString(data['id']);
+
+      final deleteResult = await collection.deleteOne(where.id(objectId));
+      if (deleteResult.nRemoved == 1) {
+        return Response.ok('Document with $objectId removed successfully');
+      } else {
+        return Response.notFound('Document with $objectId not found');
+      }
+    } else {
+      return Response.badRequest(body: 'Invalid body, id is required');
+    }
+  } catch (e) {
+    return Response.internalServerError(body: 'Error deleting document: $e');
+  }
 }
